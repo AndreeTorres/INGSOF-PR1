@@ -1,0 +1,89 @@
+version: "3.9"
+
+services:
+  mariadb:
+    build:
+      context: ./mariadb
+      dockerfile: Dockerfile
+    image: local/centos-mariadb:latest
+    container_name: mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: "rootpassword"
+      MARIADB_DATABASE: "appdb"
+      MARIADB_USER: "appuser"
+      MARIADB_PASSWORD: "apppassword"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - lemp-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpassword"]
+      timeout: 5s
+      retries: 10
+      interval: 30s
+
+  php:
+    build:
+      context: ./php
+      dockerfile: Dockerfile
+    image: local/centos-php:8.2
+    container_name: php-fpm
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_USER: appuser
+      DB_PASSWORD: apppassword
+      DB_NAME: appdb
+    volumes:
+      - ./app:/var/www/html:rw
+    networks:
+      - lemp-network
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      timeout: 5s
+      retries: 5
+      interval: 30s
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: local/centos-nginx:latest
+    container_name: nginx
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SERVER_NAME: "localhost"
+    volumes:
+      - ./app:/var/www/html:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_ssl:/etc/ssl:rw
+    networks:
+      - lemp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/", "||", "exit", "1"]
+      timeout: 5s
+      retries: 5
+      interval: 30s
+
+volumes:
+  mariadb_data:
+    driver: local
+  nginx_ssl:
+    driver: local
+
+networks:
+  lemp-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
