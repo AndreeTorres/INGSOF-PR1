@@ -191,23 +191,69 @@ PHP-FPM (FastCGI Process Manager) ofrece un rendimiento superior al módulo trad
 
 ```dockerfile
 FROM quay.io/centos/centos:stream9
-ENV TERM=xterm LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 
-# Repositorio Remi para PHP 8.2 moderno
-RUN dnf -y update && dnf -y install dnf-plugins-core curl && \
-    dnf -y install https://rpms.remirepo.net/enterprise/remi-release-9.rpm && \
-    dnf -y module reset php && dnf -y module enable php:remi-8.2 && \
-    dnf -y install php-fpm php-cli php-common php-mysqlnd php-opcache php-gd php-xml php-mbstring && \
-    dnf clean all
+ENV TERM=xterm \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8
 
-# Configuración PHP-FPM para contenedores Docker
+# 0) Repos fijos (evita mirrorlist rotas en builds)
+RUN rm -f /etc/yum.repos.d/*.repo && \
+    echo '[baseos]' > /etc/yum.repos.d/centos-stream.repo && \
+    echo 'name=CentOS Stream 9 - BaseOS' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'baseurl=http://mirror.stream.centos.org/9-stream/BaseOS/$basearch/os/' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'enabled=1' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'gpgcheck=1' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo '' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo '[appstream]' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'name=CentOS Stream 9 - AppStream' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'baseurl=http://mirror.stream.centos.org/9-stream/AppStream/$basearch/os/' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'enabled=1' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'gpgcheck=1' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo '' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo '[crb]' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'name=CentOS Stream 9 - CRB' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'baseurl=http://mirror.stream.centos.org/9-stream/CRB/$basearch/os/' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'enabled=1' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'gpgcheck=1' >> /etc/yum.repos.d/centos-stream.repo && \
+    echo 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial' >> /etc/yum.repos.d/centos-stream.repo && \
+    rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial || true
+
+# 1) Refrescar metadata, upgrade base y herramientas mínimas
+RUN dnf -y clean all && rm -rf /var/cache/dnf && \
+    dnf -y makecache && \
+    dnf -y upgrade --refresh && \
+    dnf -y install --allowerasing dnf-plugins-core curl ca-certificates && \
+    update-ca-trust
+
+# 2) EPEL + Remi para EL9 (usar URLs directas evita mirrors)
+RUN dnf -y install http://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+    dnf -y install https://rpms.remirepo.net/enterprise/remi-release-9.rpm
+
+# 3) Activar stream de PHP 8.2 (puedes cambiar a 8.3 si quieres)
+RUN dnf -y module reset php && \
+    dnf -y module enable php:remi-8.2
+
+# 4) Instalar PHP-FPM + extensiones necesarias (mysqlnd)
+RUN dnf -y install \
+      php-fpm php-cli php-common php-mysqlnd php-opcache php-gd php-xml php-mbstring \
+    && dnf clean all
+
+# 5) Crear directorio para PID de PHP-FPM y configurar permisos
+RUN mkdir -p /run/php-fpm && \
+    chown -R apache:apache /run/php-fpm
+
+# 6) Configurar PHP-FPM para escuchar en 0.0.0.0:9000 y exponer variables de entorno
 RUN sed -ri 's|^;?listen\s*=.*|listen = 0.0.0.0:9000|' /etc/php-fpm.d/www.conf && \
-    sed -ri 's|^;?clear_env\s*=.*|clear_env = no|' /etc/php-fpm.d/www.conf
+    sed -ri 's|^;?clear_env\s*=.*|clear_env = no|' /etc/php-fpm.d/www.conf && \
+    sed -ri 's|^;?listen\.allowed_clients\s*=.*|; listen.allowed_clients disabled for Docker|' /etc/php-fpm.d/www.conf
 
 WORKDIR /var/www/html
 EXPOSE 9000
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD php-fpm -t
 CMD ["php-fpm","-F"]
+
 ```
 
 **Componentes instalados y su propósito:**
@@ -219,8 +265,10 @@ CMD ["php-fpm","-F"]
 - **php-mbstring**: Soporte completo para caracteres multibyte (UTF-8, etc.)
 
 **Configuraciones específicas para Docker:**
+- **Directorio PID**: Se crea `/run/php-fpm` para almacenar el archivo PID del proceso principal
 - **Puerto 0.0.0.0:9000**: PHP-FPM acepta conexiones desde cualquier IP del contenedor
 - **clear_env = no**: Permite que variables de entorno del contenedor sean accesibles en PHP
+- **listen.allowed_clients deshabilitado**: Permite conexiones desde otros contenedores Docker
 - **Healthcheck**: Verifica cada 30 segundos que PHP-FPM responde correctamente
 - **Modo foreground**: Evita que el proceso se ejecute como daemon para mantener el contenedor activo
 
@@ -397,13 +445,320 @@ networks:
 # Construir y levantar todos los servicios
 docker-compose up -d --build
 
-# Ver logs de todos los servicios
-docker-compose logs -f
 
+### 3.4 Aplicación de Prueba
+
+Para demostrar que el stack funciona correctamente, crearemos una aplicación PHP simple y limpia que se conecta a MariaDB y muestra el estado de los servicios:
+
+```bash
+cat > app/index.php <<'EOF'
+<?php
+// Obtener configuración desde variables de entorno
+$host = getenv('DB_HOST') ?: 'mariadb';
+$user = getenv('DB_USER') ?: 'appuser';  
+$pass = getenv('DB_PASSWORD') ?: 'apppassword';
+$db   = getenv('DB_NAME') ?: 'appdb';
+
+// Intentar conexión a la base de datos
+$mysqli = @new mysqli($host, $user, $pass, $db);
+
+if ($mysqli->connect_errno) {
+    $db_status = "❌ Error de conexión";
+    $db_error = $mysqli->connect_error;
+} else {
+    $db_status = "✅ Conectado";
+    $version_result = $mysqli->query("SELECT VERSION() as version");
+    $version = $version_result->fetch_assoc()['version'];
+    $mysqli->close();
+}
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stack LEMP - CentOS Stream 9</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 600px; 
+            margin: 60px auto; 
+            padding: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 80vh;
+        }
+        .container {
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+        }
+        h1 {
+            margin: 0 0 30px 0;
+            font-size: 2.2em;
+        }
+        .status-grid {
+            display: grid;
+            gap: 20px;
+            margin: 30px 0;
+        }
+        .status-item {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 12px;
+            border-left: 4px solid #4ade80;
+        }
+        .status-item h3 {
+            margin: 0 0 10px 0;
+            color: #4ade80;
+            font-size: 1.1em;
+        }
+        .version-info {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Stack LEMP</h1>
+        <p>CentOS Stream 9 + Nginx + PHP + MariaDB</p>
+        
+        <div class="status-grid">
+            <div class="status-item">
+                <h3>🌐 Servidor Web</h3>
+                <p>✅ Nginx funcionando</p>
+            </div>
+            
+            <div class="status-item">
+                <h3>🐘 PHP-FPM</h3>
+                <p>✅ PHP <?= phpversion() ?></p>
+            </div>
+            
+            <div class="status-item">
+                <h3>�️ Base de Datos</h3>
+                <p><?= $db_status ?></p>
+                <?php if (isset($version)): ?>
+                    <small>MariaDB <?= htmlspecialchars($version) ?></small>
+                <?php endif; ?>
+                <?php if (isset($db_error)): ?>
+                    <small><?= htmlspecialchars($db_error) ?></small>
+                <?php endif; ?>
+            </div>
+        </div>
+        
+        <div class="version-info">
+            Sistema: <?= php_uname('s r') ?>
+        </div>
+    </div>
+</body>
+</html>
+EOF
+```
+
+### 3.5 Configuración Docker Compose 
+
+El archivo `docker-compose.yml` final optimizado para desarrollo, compatible con arquitecturas ARM64 y x86_64:
+
+```bash
+cat > docker-compose.yml <<'EOF'
+version: "3.9"
+
+services:
+  mariadb:
+    build:
+      context: ./mariadb
+      dockerfile: Dockerfile
+    image: local/centos-mariadb:latest
+    container_name: mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: "rootpassword"
+      MARIADB_DATABASE: "appdb"
+      MARIADB_USER: "appuser"
+      MARIADB_PASSWORD: "apppassword"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - lemp-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpassword"]
+      timeout: 5s
+      retries: 10
+      interval: 30s
+
+  php:
+    build:
+      context: ./php
+      dockerfile: Dockerfile
+    image: local/centos-php:8.2
+    container_name: php-fpm
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_USER: appuser
+      DB_PASSWORD: apppassword
+      DB_NAME: appdb
+    volumes:
+      - ./app:/var/www/html:rw
+    networks:
+      - lemp-network
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      timeout: 5s
+      retries: 5
+      interval: 30s
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: local/centos-nginx:latest
+    container_name: nginx
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SERVER_NAME: "localhost"
+    volumes:
+      - ./app:/var/www/html:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_ssl:/etc/ssl:rw
+    networks:
+      - lemp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/", "||", "exit", "1"]
+      timeout: 5s
+      retries: 5
+      interval: 30s
+
+volumes:
+  mariadb_data:
+    driver: local
+  nginx_ssl:
+    driver: local
+
+networks:
+  lemp-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+EOF
+```
+
+## 3.6 Solución de Problemas Comunes
+
+### 3.6.1 Error: PHP-FPM "Unable to create PID file"
+
+**Problema**: El contenedor PHP-FPM falla con el error `Unable to create the PID file (/run/php-fpm/php-fpm.pid).: No such file or directory`
+
+**Solución**: Este error ocurre porque el directorio `/run/php-fpm` no existe en el contenedor. Las correcciones incluidas en el Dockerfile solucionan esto:
+
+```dockerfile
+# Crear directorio para PID de PHP-FPM y configurar permisos
+RUN mkdir -p /run/php-fpm && \
+    chown -R apache:apache /run/php-fpm
+```
+
+### 3.6.2 Error: 502 Bad Gateway al acceder a PHP
+
+**Problema**: Nginx devuelve error 502 al intentar procesar archivos PHP.
+
+**Solución**: Esto sucede cuando PHP-FPM tiene restricciones de `listen.allowed_clients`. La configuración actualizada deshabilita esta restricción para contenedores Docker:
+
+```dockerfile
+# Deshabilitar listen.allowed_clients para Docker
+sed -ri 's|^;?listen\.allowed_clients\s*=.*|; listen.allowed_clients disabled for Docker|' /etc/php-fpm.d/www.conf
+```
+
+**Verificación**: Comprueba que PHP-FPM esté escuchando correctamente:
+```bash
+# Verificar conectividad entre contenedores
+docker-compose exec nginx curl -f http://php:9000 || echo "Connection failed"
+
+# Verificar logs de PHP-FPM
+docker-compose logs php --tail=20
+```
+
+## 4. Despliegue y Verificación
+
+### 4.1 Construcción y Puesta en Marcha
+
+```bash
+# Navegar al directorio del proyecto
+cd centos-stack
+
+# Construir todas las imágenes
+docker-compose build --no-cache
+
+# Levantar todos los servicios en segundo plano
+docker-compose up -d
+
+# Verificar el estado de los servicios
+docker-compose ps
+
+# Monitorear logs en tiempo real
+docker-compose logs -f
+```
+
+### 4.2 Verificación del Funcionamiento
+
+1. **Acceso Web**: Abrir navegador y visitar:
+   - HTTP: `http://localhost` (redirige automáticamente a HTTPS)
+   - HTTPS: `https://localhost` (certificado auto-firmado)
+
+2. **Verificación de servicios**:
+   ```bash
+   # Estado de contenedores
+   docker-compose ps
+   
+   # Logs específicos por servicio
+   docker-compose logs nginx
+   docker-compose logs php
+   docker-compose logs mariadb
+   
+   # Acceso directo a los contenedores
+   docker-compose exec php bash
+   docker-compose exec mariadb bash
+   docker-compose exec nginx bash
+   ```
+
+3. **Pruebas de conectividad**:
+   ```bash
+   # Verificar conexión PHP -> MariaDB
+   docker-compose exec php php -r "
+   \$mysqli = new mysqli('mariadb', 'appuser', 'apppassword', 'appdb');
+   echo \$mysqli->connect_error ? 'Error: '.\$mysqli->connect_error : 'Conexión exitosa';
+   "
+   ```
+
+### 4.3 Comandos de Mantenimiento
+
+```bash
 # Parar todos los servicios
 docker-compose down
 
-# Parar y eliminar volúmenes y base de datos
+# Parar y eliminar volúmenes incluyendo la BD
 docker-compose down -v
-```
 
+# Reconstruir solo un servicio específico
+docker-compose up -d --build nginx
+
+# Ver uso de recursos
+docker stats
+
+# Limpiar imágenes no utilizadas
+docker image prune -f
+```
