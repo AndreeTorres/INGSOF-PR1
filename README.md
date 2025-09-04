@@ -88,52 +88,47 @@ http {
 El archivo `site.conf` implementa una configuración de seguridad  que fuerza HTTPS y habilita HTTP/2. También configura la integración con PHP-FPM:
 
 ```nginx
-# Servidor HTTP - Redirección obligatoria a HTTPS
+# HTTP -> redirección a HTTPS
 server {
     listen 80;
     listen [::]:80;
-    server_name _;
+    server_name localhost;
+    
 
-    # Excepción para Let's Encrypt (renovación automática de certificados)
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/html;
     }
-
-    # Redirigir todo el tráfico HTTP a HTTPS
-    location / {
-        return 301 https://$host$request_uri;
-    }
+    
+    return 301 https://$host$request_uri;
 }
 
-# Servidor HTTPS principal con HTTP/2 y PHP
+# HTTPS con HTTP/2 y mkcert
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name _;
+    server_name localhost;
 
     root /var/www/html;
     index index.php index.html;
 
-    # Configuración SSL 
-    ssl_certificate     /etc/ssl/certs/server.crt;
-    ssl_certificate_key /etc/ssl/private/server.key;
+    # OJO: apuntamos directo a los archivos montados en /etc/ssl/local
+    ssl_certificate     /etc/ssl/local/localhost.pem;
+    ssl_certificate_key /etc/ssl/local/localhost-key.pem;
+
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
 
-    # Headers de seguridad HTTP
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # Seguridad básica 
     add_header X-Content-Type-Options nosniff;
     add_header X-Frame-Options SAMEORIGIN;
     add_header X-XSS-Protection "1; mode=block";
 
-    # Procesamiento de archivos PHP via FastCGI
     location ~ \.php$ {
         include /etc/nginx/fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_pass php:9000;  # Conecta con el contenedor PHP-FPM
+        fastcgi_pass php:9000;
     }
 
-    # Manejo de URLs amigables
     location / {
         try_files $uri $uri/ /index.php?$args;
     }
@@ -146,43 +141,47 @@ server {
 **Características de seguridad implementadas:**
 - **Redirección forzada a HTTPS**: Todo el tráfico HTTP se redirige automáticamente
 - **HTTP/2**: Protocolo moderno que mejora significativamente el rendimiento
-- **HSTS**: Fuerza a los navegadores a usar HTTPS durante un año
+- **Certificados SSL locales**: Utiliza certificados montados desde `/etc/ssl/local`
 - **Protección XSS**: Previene ataques de scripts maliciosos
 - **Protección contra clickjacking**: Evita que el sitio sea embebido en iframes maliciosos
 - **PHP-FPM**: Comunicación eficiente con PHP a través del puerto 9000
 
 #### 2.1.4 Script de Inicialización de Nginx
 
-El script `entrypoint.sh` automatiza la generación de certificados SSL y el inicio del servidor. Este enfoque garantiza que el contenedor funcione correctamente desde el primer arranque:
+El script `entrypoint.sh` automatiza la generación de certificados SSL locales y el inicio del servidor. Este enfoque garantiza que el contenedor funcione correctamente desde el primer arranque con certificados mkcert:
 
 ```bash
 #!/usr/bin/env bash
 set -e
-CRT="/etc/ssl/certs/server.crt"
-KEY="/etc/ssl/private/server.key"
-CN="${SERVER_NAME:-localhost}"
 
-mkdir -p /etc/ssl/certs /etc/ssl/private
+echo ">> Generando certificado auto-firmado para CN=localhost ..."
 
-# Genera certificado auto-firmado si no existe
-if [ ! -f "$CRT" ] || [ ! -f "$KEY" ]; then
-  openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
-    -keyout "$KEY" -out "$CRT" \
-    -subj "/CN=$CN" \
-    -addext "subjectAltName=DNS:$CN,DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1
-  chmod 600 "$KEY"
+# Crear directorios necesarios
+mkdir -p /etc/ssl/local
+
+# Generar certificado auto-firmado si no existe
+if [ ! -f "/etc/ssl/local/localhost.pem" ] || [ ! -f "/etc/ssl/local/localhost-key.pem" ]; then
+    openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+        -keyout "/etc/ssl/local/localhost-key.pem" \
+        -out "/etc/ssl/local/localhost.pem" \
+        -subj "/CN=localhost" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1
+    
+    chmod 600 "/etc/ssl/local/localhost-key.pem"
 fi
+
+echo ">> Iniciando Nginx (HTTP/2 + TLS)"
 exec nginx -g 'daemon off;'
 ```
 
 **Proceso de inicialización:**
-1. **Verificación de certificados**: Comprueba si ya existen certificados SSL válidos
+1. **Verificación de certificados**: Comprueba si ya existen certificados SSL válidos en `/etc/ssl/local`
 2. **Generación automática**: Si no existen, crea un certificado auto-firmado de 2048 bits válido por 365 días
 3. **SAN (Subject Alternative Names)**: El certificado incluye localhost e IP local para máxima compatibilidad
 4. **Seguridad de archivos**: La clave privada se protege con permisos restrictivos (600)
-5. **Inicio en primer plano**: Nginx se ejecuta sin daemon para mantener el contenedor activo
+5. **Inicio en primer plano**: Nginx se inicia sin daemon para mantener el contenedor activo
 
-Este certificado auto-firmado es perfecto para desarrollo, pero en producción debería reemplazarse con uno de una autoridad certificadora confiable.
+Este certificado auto-firmado es perfecto para desarrollo local, y la configuración está preparada para usar certificados mkcert montados desde el host.
 ### 2.2 Intérprete PHP-FPM
 
 #### 2.2.1 Dockerfile de PHP
@@ -362,6 +361,133 @@ exec mariadbd --datadir="$DATA_DIR" --user=mysql --bind-address=0.0.0.0
 6. **Inicio del servidor**: MariaDB se inicia aceptando conexiones desde cualquier IP del contenedor
 
 La configuración UTF-8 (`utf8mb4_unicode_ci`) es crucial para aplicaciones s, ya que soporta emojis y caracteres especiales internacionales.
+### 2.4 Generación Automática de Certificados SSL
+
+#### 2.4.1 Proceso de Generación de Certificados
+
+El stack implementa una solución automática para certificados SSL que funciona desde el primer arranque del contenedor. Los certificados se generan usando OpenSSL y se almacenan en `/etc/ssl/local/` dentro del contenedor nginx.
+
+#### 2.4.2 Ubicación y Estructura de Certificados
+
+```bash
+centos-stack/
+├── certs/local/              # Montaje del host (opcional)
+│   ├── localhost.pem         # Certificado público
+│   └── localhost-key.pem     # Clave privada
+└── nginx/
+    └── entrypoint.sh         # Script que genera los certificados
+```
+
+Los certificados se crean en `/etc/ssl/local/` dentro del contenedor nginx con la siguiente estructura:
+- **localhost.pem**: Certificado público auto-firmado
+- **localhost-key.pem**: Clave privada RSA de 2048 bits
+
+#### 2.4.3 Comando OpenSSL Utilizado
+
+El script utiliza el siguiente comando OpenSSL para generar certificados auto-firmados:
+
+```bash
+openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+    -keyout "/etc/ssl/local/localhost-key.pem" \
+    -out "/etc/ssl/local/localhost.pem" \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1
+```
+
+**Parámetros explicados:**
+- **`-x509`**: Genera un certificado auto-firmado en formato X.509
+- **`-nodes`**: No cifra la clave privada (necesario para servidores web)
+- **`-newkey rsa:2048`**: Crea una nueva clave RSA de 2048 bits
+- **`-days 365`**: El certificado es válido por 1 año
+- **`-subj "/CN=localhost"`**: Establece el Common Name como localhost
+- **`-addext "subjectAltName=..."`**: Añade nombres alternativos para compatibilidad
+
+#### 2.4.4 Subject Alternative Names (SAN)
+
+Los certificados incluyen Subject Alternative Names que permiten que funcionen con múltiples formas de acceso:
+
+```
+DNS:localhost     # Acceso via https://localhost
+IP:127.0.0.1     # Acceso via https://127.0.0.1
+```
+
+Esto garantiza que el certificado sea válido tanto para `https://localhost` como para `https://127.0.0.1`, evitando errores de certificado en el navegador.
+
+#### 2.4.5 Flujo de Generación Automática
+
+```mermaid
+graph TD
+    A[Contenedor nginx inicia] --> B{¿Existen certificados?}
+    B -->|No| C[Crear directorio /etc/ssl/local]
+    C --> D[Generar certificado con OpenSSL]
+    D --> E[Establecer permisos 600 en clave privada]
+    E --> F[Iniciar nginx]
+    B -->|Sí| F[Iniciar nginx]
+```
+
+#### 2.4.6 Verificación de Certificados
+
+Para verificar que los certificados se generaron correctamente:
+
+```bash
+# Ver detalles del certificado
+docker-compose exec nginx openssl x509 -in /etc/ssl/local/localhost.pem -text -noout
+
+# Verificar la clave privada
+docker-compose exec nginx openssl rsa -in /etc/ssl/local/localhost-key.pem -check
+
+# Verificar que certificado y clave coinciden
+docker-compose exec nginx openssl x509 -in /etc/ssl/local/localhost.pem -modulus -noout | openssl md5
+docker-compose exec nginx openssl rsa -in /etc/ssl/local/localhost-key.pem -modulus -noout | openssl md5
+```
+
+#### 2.4.7 Integración con mkcert (Opcional)
+
+Para una experiencia de desarrollo más fluida sin advertencias del navegador, puedes usar mkcert para generar certificados confiables:
+
+```bash
+# Instalar mkcert (macOS)
+brew install mkcert
+
+# Crear CA local
+mkcert -install
+
+# Generar certificados para localhost
+mkcert localhost 127.0.0.1 ::1
+
+# Copiar certificados al proyecto
+mkdir -p ./certs/local
+cp localhost+2.pem ./certs/local/localhost.pem
+cp localhost+2-key.pem ./certs/local/localhost-key.pem
+```
+
+Luego modifica el docker-compose.yml para montar los certificados:
+
+```yaml
+nginx:
+  # ...existing config...
+  volumes:
+    - ./app:/var/www/html:ro
+    - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    - ./certs/local:/etc/ssl/local:ro  # Montar certificados mkcert
+```
+
+#### 2.4.8 Renovación y Mantenimiento
+
+**Certificados auto-firmados:**
+- Se regeneran automáticamente si se eliminan los archivos
+- Válidos por 365 días desde la creación
+- No requieren renovación manual durante el desarrollo
+
+**Para producción:**
+- Reemplaza los certificados auto-firmados con certificados de CA válida
+- Implementa renovación automática con certbot
+
+```bash
+# Forzar regeneración de certificados
+docker-compose exec nginx rm -f /etc/ssl/local/localhost*
+docker-compose restart nginx
+```
 ## 3. Uso del Stack
 
 ### 3.1 Estructura Final del Proyecto
@@ -634,7 +760,7 @@ services:
     volumes:
       - ./app:/var/www/html:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - nginx_ssl:/etc/ssl:rw
+      - ./certs/local:/etc/ssl/local:ro  # Montar certificados mkcert
     networks:
       - lemp-network
     healthcheck:
