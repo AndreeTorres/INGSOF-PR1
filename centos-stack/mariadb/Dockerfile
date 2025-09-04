@@ -3,7 +3,7 @@ ENV TERM=xterm LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 MARIADB_DATA_DIR=/var/lib/mys
 
 RUN dnf -y update && dnf -y install mariadb-server procps-ng which && dnf clean all
 
-# Asegura que 'mariadbd' exista (algunas builds lo exponen como mysqld)
+
 RUN command -v mariadbd >/dev/null 2>&1 || (ln -s "$(command -v mysqld)" /usr/sbin/mariadbd)
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
