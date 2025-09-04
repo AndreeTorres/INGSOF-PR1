@@ -67,6 +67,7 @@ services:
       - ./app:/var/www/html:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - nginx_ssl:/etc/ssl:rw
+      - ./certs:/etc/ssl/local:ro
     networks:
       - lemp-network
     healthcheck:
